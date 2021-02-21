@@ -19,6 +19,8 @@ bool IRuntime::Initialize()
         return false;
     }
 
+    ILogger::GetInstance().TraceInfo("[IRuntime] Telegram version: " + std::to_string(_FileVersion));
+
     if (!GetModuleInformation(GetCurrentProcess(), (HMODULE)_MainModule, &_MainModuleInfo, sizeof(_MainModuleInfo))) {
         return false;
     }
@@ -58,20 +60,38 @@ bool IRuntime::InitFixedData()
 
 bool IRuntime::InitDynamicData()
 {
-    __try
-    {
-        return InitDynamicData_MallocFree() &&
-            InitDynamicData_DestroyMessage() &&
-            InitDynamicData_EditedIndex() &&
-            InitDynamicData_SignedIndex() &&
-            InitDynamicData_ReplyIndex() &&
-            InitDynamicData_LangInstance() &&
-            InitDynamicData_ToHistoryMessage();
-    }
-    __except(EXCEPTION_EXECUTE_HANDLER)
-    {
-        return false;
-    }
+    auto &Logger = ILogger::GetInstance();
+
+    bool Result = false;
+
+    Safe::TryExcept(
+        [&]() {
+#define INIT_DATA_AND_LOG(name)                                                 \
+            if (!InitDynamicData_ ## name()) {                                  \
+                Logger.TraceWarn("[IRuntime] InitDynamicData_" # name "() failed.");       \
+                return;                                                         \
+            }                                                                   \
+            else {                                                              \
+                Logger.TraceInfo("[IRuntime] InitDynamicData_" # name "() succeeded.");    \
+            }
+
+            INIT_DATA_AND_LOG(MallocFree);
+            INIT_DATA_AND_LOG(DestroyMessage);
+            INIT_DATA_AND_LOG(EditedIndex);
+            INIT_DATA_AND_LOG(SignedIndex);
+            INIT_DATA_AND_LOG(ReplyIndex);
+            INIT_DATA_AND_LOG(LangInstance);
+            INIT_DATA_AND_LOG(ToHistoryMessage);
+
+#undef INIT_DATA_AND_LOG
+            Result = true;
+        },
+        [&](uint32_t ExceptionCode) {
+            Logger.TraceWarn("[IRuntime] InitDynamicData() caught an exception, code: " + Text::Format("0x%x", ExceptionCode));
+        }
+    );
+
+    return Result;
 }
 
 std::vector<uintptr_t> IRuntime::FindPatternInMainModule(const char Pattern[], const char Mask[])
@@ -425,6 +445,8 @@ bool IRuntime::InitDynamicData_ReplyIndex()
 
 bool IRuntime::InitDynamicData_LangInstance()
 {
+    using namespace std::chrono_literals;
+
     /*
         Lang::Instance *__cdecl Lang::Current()
 
@@ -503,7 +525,23 @@ bool IRuntime::InitDynamicData_LangInstance()
         }
     }
 
-    uintptr_t CoreAppInstance = *(uintptr_t*)(*(uintptr_t*)(vResult.at(0) + 2));
+    uintptr_t pCoreAppInstance = *(uintptr_t*)(vResult.at(0) + 2);
+
+    uintptr_t CoreAppInstance = NULL;
+    for (size_t i = 0; i < 20; ++i)
+    {
+        CoreAppInstance = *(uintptr_t*)pCoreAppInstance;
+        if (CoreAppInstance != NULL) {
+            break;
+        }
+        std::this_thread::sleep_for(1s);
+    }
+
+    if (CoreAppInstance == NULL) {
+        ILogger::GetInstance().TraceWarn("[IRuntime] CoreAppInstance always nullptr.");
+        return false;
+    }
+
     _Data.Address.pLangInstance = *(LanguageInstance**)(CoreAppInstance + LangInsOffset);
 
     if (_Data.Address.pLangInstance == NULL) {
